@@ -1,0 +1,10 @@
+/bin/
+/metastore_db/
+/project/
+/target/
+derby.log
+results.txt
+z_*.*
+*.*~
+.classpath
+.project

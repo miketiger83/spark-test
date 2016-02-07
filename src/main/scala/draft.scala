@@ -33,33 +33,64 @@ object SimpleApp {
     val conf = new SparkConf().setAppName("Spark Test App")
     val sc = new SparkContext(conf)
 	
-	val NumberFormat currencyFormat = new java.text.NumberFormat(new java.util.Locale("en", "US", "USD")).getCurrencyInstance();
-
-	case class User (customerID: Long, fullName: String, emails: List[String], phoneNumbers: List[String])
+    val locale = new java.util.Locale("en", "US", "USD")
+    val currencyFormat = java.text.NumberFormat.getCurrencyInstance(locale)
+    
+	case class User (customerID: Long, fullName: String, emails: Set[String], phoneNumbers: Set[String])
 	case class Transaction (customerID: Long, amount: BigDecimal, date: String)
 	// TODO: Use a Date calss instead of String for Date
 
-	val doNotCallList = sc.textFile("donotcall.txt");
+	val doNotCallRDD = sc.textFile("donotcall-test.txt");
+  // broadcast variable will improve performance by delivering the data once to all the nodes instead of having to serialize it with each task
+  val doNotCallBC = sc.broadcast(doNotCallRDD.collect.toSet)
 
-	val users = sc.textFile("users.txt").map(_.split(";")).map(u => (u(0), User(u(0), u(1), map(u(2).split(",")), map(u(3).split(",")) diff doNotCallList )));
+  
+	val userLines = sc.textFile("users-test.txt")
+	
+	val userRegex = """^\d{1,18};[^;]*;[^;]*;[\d \,\(\)-]+""".r // validates input for further processing and filters out users without phone numbers
+	val validUserLines = userLines.filter(line => userRegex.pattern.matcher(line).matches)
+	
+	val validUsers = validUserLines.map(_.split(";")).map(u => (u(0).toLong, User(u(0).toLong, u(1), u(2).split(",").toSet, u(3).split(",").toSet)))
+	// TODO: Array to list
+	// TODO: remove emails - not relevant
 	// TODO: assumption is that when user have several phone numbers and only some of them are in donotcalllist, user may be contacted using other
 	// TODO: diff doNotCallList assumes there are no repetitive values in phone numbers.
 
-	val usersWithPhone = users.filter(u => u.phoneNumbers.nonEmpty)
+	val usersWithFilterdPhones = validUsers.map{ case(id, u) => (id, User(u.customerID, u.fullName, u.emails, u.phoneNumbers -- doNotCallBC.value))}
+	//val usersWithPhone = users.filter(u => u.phoneNumbers.nonEmpty)
 
-	val transactions = sc.textFile("transactions.txt").map(_.split(";")).map(t => (t(0), Transaction(t(0), currencyFormat.parse(t(1)), t(2) )
-	));
+	//val usersWithPhoneWeCanCall = users.filter{case (user, d) => doNotCallBC.value.contains(d)}
+	val usersWhiteList = usersWithFilterdPhones.filter{case (id, user) => user.phoneNumbers.nonEmpty}
+		
+	val transactions = sc.textFile("transactions-test.txt").map(_.split(";")).map(t => (t(0).toLong, Transaction(t(0).toLong, BigDecimal(currencyFormat.parse(t(1)).toString), t(2) ) ))
 
 	/* Filter by year */
-	val transactions2015 = transactions.filter(t => t.date.startsWith("2015"))
+	val transactions2015 = transactions.filter{case (id, transaction) => transaction.date.startsWith("2015")}
 	// TODO: re-implement using Spark date functins, which were added in Spark 1.5. For now we will use string manipulations
 
 	/* calculate sum */
-	val userTransactions = transactions2015.reduceByKey(_.amount + _.amount)
+	val transactionsTotalPerUser = transactions2015.reduceByKey{ (l,r) => Transaction(l.customerID, l.amount + r.amount, l.date )}
 
 	/* Get results */
-	usersWithPhone.join(userTransactions).take(1000)
+	val userTransactions = usersWhiteList.join(transactionsTotalPerUser)
 	// TODO: inner join? Can we optimize the join?
 	// TODO: does the order of a join matter (one set is bigger)
+	
+	val topUsers = userTransactions.takeOrdered(100)(Ordering[BigDecimal].reverse.on(ut => ut._2._2.amount))
+	
+	val formattedResult = topUsers.map(x => "%d, %s, %s, %s".format(x._1, x._2._1.fullName, x._2._1.phoneNumbers.mkString("[", ", ", "]"), x._2._2.amount.toString))
+	
+	scala.tools.nsc.io.File("results").writeAll(formattedResult.mkString("\n"))
+	
   }
 }
+
+/*
+val regex4 = """^\d{1,10};[^;]*;[^;]*;[\d \,\(\)-]+""".r
+val regex = "a.c".r
+val tokens = List("abc", "axc", "abd", "azc")
+tokens filter (x => regex.pattern.matcher(x).matches)
+
+
+*/
+
